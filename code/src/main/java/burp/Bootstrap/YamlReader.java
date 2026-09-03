@@ -99,8 +99,34 @@ public class YamlReader {
         return (boolean) this.getValueByKey(key);
     }
 
+    public Boolean getBoolean(String key, Boolean defaultValue) {
+        Object value = this.getValueByKey(key);
+        if (value == null) {
+            return defaultValue;
+        }
+        if (value instanceof Boolean) {
+            return (Boolean) value;
+        }
+        return Boolean.valueOf(String.valueOf(value));
+    }
+
     public Integer getInteger(String key) {
         return (Integer) this.getValueByKey(key);
+    }
+
+    public Integer getInteger(String key, Integer defaultValue) {
+        Object value = this.getValueByKey(key);
+        if (value == null) {
+            return defaultValue;
+        }
+        if (value instanceof Number) {
+            return ((Number) value).intValue();
+        }
+        try {
+            return Integer.valueOf(String.valueOf(value));
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     public double getDouble(String key) {

@@ -10,6 +10,7 @@ public class BaseSettingTag {
     private YamlReader yamlReader;
 
     private JCheckBox isStartBox;
+    private JCheckBox allDirectoryScanBox;
 
     public BaseSettingTag(IBurpExtenderCallbacks callbacks, JTabbedPane tabs, YamlReader yamlReader) {
         JPanel baseSetting = new JPanel(new GridBagLayout());
@@ -18,6 +19,7 @@ public class BaseSettingTag {
 
         this.input1_1(baseSetting, c);
         this.input1_2(baseSetting, c);
+        this.input1_3(baseSetting, c);
 
         tabs.addTab("基本设置", baseSetting);
     }
@@ -41,7 +43,20 @@ public class BaseSettingTag {
         baseSetting.add(this.isStartBox, c);
     }
 
+    private void input1_3(JPanel baseSetting, GridBagConstraints c) {
+        this.allDirectoryScanBox = new JCheckBox("全部目录主动跑（每目录最多2个，总数不限）", this.yamlReader.getBoolean("scan.allDirectoryScan.isStart", true));
+        this.allDirectoryScanBox.setFont(new Font("Serif", Font.PLAIN, this.allDirectoryScanBox.getFont().getSize()));
+        c.insets = new Insets(5, 5, 5, 5);
+        c.gridx = 0;
+        c.gridy = 3;
+        baseSetting.add(this.allDirectoryScanBox, c);
+    }
+
     public Boolean isStart() {
         return this.isStartBox.isSelected();
+    }
+
+    public Boolean isAllDirectoryScan() {
+        return this.allDirectoryScanBox.isSelected();
     }
 }

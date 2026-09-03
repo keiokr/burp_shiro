@@ -7,6 +7,9 @@ import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.io.PrintWriter;
 
 import burp.Ui.Tags;
@@ -39,6 +42,10 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IHttpListener
     private YamlReader yamlReader;
 
     private final Set<String> httpListenerScanningUrls = Collections.synchronizedSet(new HashSet<String>());
+    private final Map<String, AtomicInteger> scanReservations = new ConcurrentHashMap<String, AtomicInteger>();
+
+    private static final int MAX_SCAN_NUMBER_PER_DIRECTORY = 2;
+    private static final int MAX_SCAN_NUMBER_PER_SITE = 2;
 
     @Override
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
@@ -173,6 +180,8 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IHttpListener
             return null;
         }
 
+        boolean allDirectoryScan = this.tags.getBaseSettingTagClass().isAllDirectoryScan();
+
         // 判断域名黑名单
         if (domainNameBlacklist != null && domainNameBlacklist.size() >= 1) {
             if (isMatchDomainName(baseBurpUrl.getRequestHost(), domainNameBlacklist)) {
@@ -195,29 +204,9 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IHttpListener
             return null;
         }
 
-        // 判断当前站点是否超出扫描数量了
-        Integer siteScanNumber = this.yamlReader.getInteger("scan.siteScanNumber");
-        if (siteScanNumber != 0) {
-            Integer siteNumber = this.getSiteNumber(baseBurpUrl.getRequestDomainName());
-            if (siteNumber >= siteScanNumber) {
-                if (messageLevel.equals("ALL")) {
-                    this.tags.getScanQueueTagClass().add(
-                            "",
-                            "",
-                            this.helpers.analyzeRequest(baseRequestResponse).getMethod(),
-                            baseBurpUrl.getHttpRequestUrl().toString(),
-                            this.helpers.analyzeResponse(baseRequestResponse.getResponse()).getStatusCode() + "",
-                            "the number of website scans exceeded",
-                            baseRequestResponse
-                    );
-                }
-                return null;
-            }
-        }
-
         // 判断当前站点的shiro指纹问题数量是否超出了
         Integer shiroFingerprintScanIssueNumber = this.yamlReader.getInteger("application.shiroFingerprintExtension.config.issueNumber");
-        if (shiroFingerprintScanIssueNumber != 0) {
+        if (!allDirectoryScan && shiroFingerprintScanIssueNumber != 0) {
             String shiroFingerprintIssueName = this.yamlReader.getString("application.shiroFingerprintExtension.config.issueName");
             Integer shiroFingerprintIssueNumber = this.getSiteIssueNumber(baseBurpUrl.getRequestDomainName(), shiroFingerprintIssueName);
             if (shiroFingerprintIssueNumber >= shiroFingerprintScanIssueNumber) {
@@ -238,7 +227,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IHttpListener
 
         // 判断当前站点的shiro加密key问题数量是否超出了
         Integer shiroCipherKeyScanIssueNumber = this.yamlReader.getInteger("application.shiroCipherKeyExtension.config.issueNumber");
-        if (shiroCipherKeyScanIssueNumber != 0) {
+        if (!allDirectoryScan && shiroCipherKeyScanIssueNumber != 0) {
             String shiroCipherKeyIssueName = this.yamlReader.getString("application.shiroCipherKeyExtension.config.issueName");
             Integer shiroCipherKeyIssueNumber = this.getSiteIssueNumber(baseBurpUrl.getRequestDomainName(), shiroCipherKeyIssueName);
             if (shiroCipherKeyIssueNumber >= shiroCipherKeyScanIssueNumber) {
@@ -255,6 +244,37 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IHttpListener
                 }
                 return null;
             }
+        }
+
+        // 扫描配额:
+        // 勾选时按站点目录分别限制，每个目录最多扫描2次，站点总数不限制；
+        // 未勾选时按站点限制，整个站点最多扫描2次。
+        String scanLimitKey;
+        int scanLimit;
+        String scanLimitMessage;
+        if (allDirectoryScan) {
+            scanLimitKey = baseBurpUrl.getRequestDomainName() + getRequestDirectory(baseBurpUrl);
+            scanLimit = this.getPositiveIntegerConfig("scan.allDirectoryScan.directoryScanNumber", MAX_SCAN_NUMBER_PER_DIRECTORY);
+            scanLimitMessage = "the number of directory scans exceeded";
+        } else {
+            scanLimitKey = baseBurpUrl.getRequestDomainName();
+            scanLimit = this.getPositiveIntegerConfig("scan.siteScanNumber", MAX_SCAN_NUMBER_PER_SITE);
+            scanLimitMessage = "the number of website scans exceeded";
+        }
+
+        if (!this.reserveScanSlot(scanLimitKey, scanLimit)) {
+            if (messageLevel.equals("ALL")) {
+                this.tags.getScanQueueTagClass().add(
+                        "",
+                        "",
+                        this.helpers.analyzeRequest(baseRequestResponse).getMethod(),
+                        baseBurpUrl.getHttpRequestUrl().toString(),
+                        this.helpers.analyzeResponse(baseRequestResponse.getResponse()).getStatusCode() + "",
+                        scanLimitMessage,
+                        baseRequestResponse
+                );
+            }
+            return null;
         }
 
         this.addDebugToUi(baseRequestResponse, "[debug] shiro fingerprint probing start", this.helpers.analyzeResponse(baseRequestResponse.getResponse()).getStatusCode() + "", baseBurpUrl.getHttpRequestUrl().toString());
@@ -610,16 +630,58 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IHttpListener
     }
 
     /**
-     * 站点出现数量
+     * 预留一次扫描配额，避免被动扫描回调并发时突破限制。
      *
-     * @param domainName
-     * @return
+     * @param key   站点或“站点+目录”配额键
+     * @param limit 最大扫描次数
+     * @return 是否成功预留
      */
-    private Integer getSiteNumber(String domainName) {
-        Integer number = 0;
-        for (IHttpRequestResponse requestResponse : this.callbacks.getSiteMap(domainName)) {
-            number++;
+    private boolean reserveScanSlot(String key, int limit) {
+        AtomicInteger count = this.scanReservations.get(key);
+        if (count == null) {
+            AtomicInteger newCount = new AtomicInteger(0);
+            AtomicInteger existingCount = this.scanReservations.putIfAbsent(key, newCount);
+            count = existingCount == null ? newCount : existingCount;
         }
-        return number;
+
+        while (true) {
+            int current = count.get();
+            if (current >= limit) {
+                return false;
+            }
+            if (count.compareAndSet(current, current + 1)) {
+                return true;
+            }
+        }
+    }
+
+    private int getPositiveIntegerConfig(String key, int defaultValue) {
+        Integer value = this.yamlReader.getInteger(key, defaultValue);
+        if (value == null || value <= 0) {
+            return defaultValue;
+        }
+        return value;
+    }
+
+    /**
+     * 获取请求所属目录。
+     * 例如 /admin/login.action 和 /admin/logout.action 都归入 /admin。
+     */
+    private String getRequestDirectory(CustomBurpUrl burpUrl) {
+        String path = burpUrl.getRequestPath();
+        if (path == null || path.length() == 0) {
+            return "/";
+        }
+
+        if (!path.startsWith("/")) {
+            path = "/" + path;
+        }
+
+        while (path.length() > 1 && path.endsWith("/")) {
+            path = path.substring(0, path.length() - 1);
+        }
+
+        int lastSlash = path.lastIndexOf('/');
+        return lastSlash <= 0 ? "/" : path.substring(0, lastSlash);
     }
 }

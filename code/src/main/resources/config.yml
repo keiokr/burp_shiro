@@ -16,10 +16,14 @@ messageLevel: "PIVOTAL"
 
 # 扫描配置
 scan:
-  # 站点扫描次数
-  # 超过次数以后就不在对该站点进行扫描了
-  # 0 表示无限次扫描
-  siteScanNumber: 0
+  # 全部目录主动跑
+  # isStart = true 时：每个目录最多跑 directoryScanNumber 个，站点总数不限制
+  # isStart = false 时：每个站点总共最多跑 siteScanNumber 个
+  allDirectoryScan:
+    isStart: true
+    directoryScanNumber: 2
+  # 未勾选“全部目录主动跑”时，每个站点总共最多跑2个
+  siteScanNumber: 2
   # 域名扫描规则
   domainName:
     # 域名黑名单
